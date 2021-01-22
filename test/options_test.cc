@@ -3,6 +3,7 @@
 #include "client/options_impl.h"
 
 #include "test/client/utility.h"
+#include "test/test_common/environment.h"
 
 #include "gtest/gtest.h"
 
@@ -30,7 +31,6 @@ public:
     EXPECT_EQ(expected_key, headers[0].header().key());
     EXPECT_EQ(expected_value, headers[0].header().value());
   }
-
   std::string client_name_;
   std::string good_test_uri_;
   std::string no_arg_match_;
@@ -84,10 +84,27 @@ TEST_F(OptionsImplTest, DurationAndNoDurationSanity) {
   EXPECT_TRUE(cmd->no_duration().value());
 }
 
+TEST_F(OptionsImplTest, StatsSinksMustBeSetWhenStatsFlushIntervalSet) {
+  EXPECT_THROW_WITH_REGEX(
+      TestUtility::createOptionsImpl(fmt::format("{} --stats-flush-interval 10", client_name_)),
+      MalformedArgvException,
+      "if --stats-flush-interval is set, then --stats-sinks must also be set");
+}
+
 // This test should cover every option we offer, except some mutually exclusive ones that
 // have separate tests.
 TEST_F(OptionsImplTest, AlmostAll) {
   Envoy::MessageUtil util;
+  const std::string sink_json_1 =
+      "{name:\"envoy.stat_sinks.statsd\",typed_config:{\"@type\":\"type."
+      "googleapis.com/"
+      "envoy.config.metrics.v3.StatsdSink\",tcp_cluster_name:\"statsd\"}}";
+  const std::string sink_json_2 =
+      "{name:\"envoy.stat_sinks.statsd\",typed_config:{\"@type\":\"type."
+      "googleapis.com/"
+      "envoy.config.metrics.v3.StatsdSink\",tcp_cluster_name:\"statsd\",prefix:"
+      "\"nighthawk\"}}";
+
   std::unique_ptr<OptionsImpl> options = TestUtility::createOptionsImpl(fmt::format(
       "{} --rps 4 --connections 5 --duration 6 --timeout 7 --h2 "
       "--concurrency 8 --verbosity error --output-format yaml --prefetch-connections "
@@ -100,13 +117,15 @@ TEST_F(OptionsImplTest, AlmostAll) {
       "--failure-predicate f2:2 --jitter-uniform .00001s "
       "--experimental-h2-use-multiple-connections "
       "--experimental-h1-connection-reuse-strategy lru --label label1 --label label2 {} "
-      "--simple-warmup",
+      "--simple-warmup --stats-sinks {} --stats-sinks {} --stats-flush-interval 10 "
+      "--latency-response-header-name zz --allow-envoy-deprecated-v2-api",
       client_name_,
       "{name:\"envoy.transport_sockets.tls\","
-      "typed_config:{\"@type\":\"type.googleapis.com/envoy.api.v2.auth.UpstreamTlsContext\","
+      "typed_config:{\"@type\":\"type.googleapis.com/"
+      "envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext\","
       "common_tls_context:{tls_params:{"
       "cipher_suites:[\"-ALL:ECDHE-RSA-AES256-GCM-SHA384\"]}}}}",
-      good_test_uri_));
+      good_test_uri_, sink_json_1, sink_json_2));
 
   EXPECT_EQ(4, options->requestsPerSecond());
   EXPECT_EQ(5, options->connections());
@@ -124,18 +143,19 @@ TEST_F(OptionsImplTest, AlmostAll) {
   const std::vector<std::string> expected_headers = {"f1:b1", "f2:b2", "f3:b3:b4"};
   EXPECT_EQ(expected_headers, options->requestHeaders());
   EXPECT_EQ(1234, options->requestBodySize());
-  EXPECT_EQ("name: \"envoy.transport_sockets.tls\"\n"
-            "typed_config {\n"
-            "  [type.googleapis.com/envoy.api.v2.auth.UpstreamTlsContext] {\n"
-            "    common_tls_context {\n"
-            "      tls_params {\n"
-            "        cipher_suites: \"-ALL:ECDHE-RSA-AES256-GCM-SHA384\"\n"
-            "      }\n"
-            "    }\n"
-            "  }\n"
-            "}\n"
-            "183412668: \"envoy.api.v2.core.TransportSocket\"\n",
-            options->transportSocket().value().DebugString());
+  EXPECT_EQ(
+      "name: \"envoy.transport_sockets.tls\"\n"
+      "typed_config {\n"
+      "  [type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext] {\n"
+      "    common_tls_context {\n"
+      "      tls_params {\n"
+      "        cipher_suites: \"-ALL:ECDHE-RSA-AES256-GCM-SHA384\"\n"
+      "      }\n"
+      "    }\n"
+      "  }\n"
+      "}\n"
+      "183412668: \"envoy.api.v2.core.TransportSocket\"\n",
+      options->transportSocket().value().DebugString());
   EXPECT_EQ(10, options->maxPendingRequests());
   EXPECT_EQ(11, options->maxActiveRequests());
   EXPECT_EQ(12, options->maxRequestsPerConnection());
@@ -153,6 +173,28 @@ TEST_F(OptionsImplTest, AlmostAll) {
   const std::vector<std::string> expected_labels{"label1", "label2"};
   EXPECT_EQ(expected_labels, options->labels());
   EXPECT_TRUE(options->simpleWarmup());
+  EXPECT_EQ(10, options->statsFlushInterval());
+  ASSERT_EQ(2, options->statsSinks().size());
+  EXPECT_EQ("name: \"envoy.stat_sinks.statsd\"\n"
+            "typed_config {\n"
+            "  [type.googleapis.com/envoy.config.metrics.v3.StatsdSink] {\n"
+            "    tcp_cluster_name: \"statsd\"\n"
+            "  }\n"
+            "}\n"
+            "183412668: \"envoy.config.metrics.v2.StatsSink\"\n",
+            options->statsSinks()[0].DebugString());
+  EXPECT_EQ("name: \"envoy.stat_sinks.statsd\"\n"
+            "typed_config {\n"
+            "  [type.googleapis.com/envoy.config.metrics.v3.StatsdSink] {\n"
+            "    tcp_cluster_name: \"statsd\"\n"
+            "    prefix: \"nighthawk\"\n"
+            "  }\n"
+            "}\n"
+            "183412668: \"envoy.config.metrics.v2.StatsSink\"\n",
+            options->statsSinks()[1].DebugString());
+  EXPECT_EQ("zz", options->responseHeaderWithLatencyInput());
+  EXPECT_TRUE(options->allowEnvoyDeprecatedV2Api());
+
   // Check that our conversion to CommandLineOptionsPtr makes sense.
   CommandLineOptionsPtr cmd = options->toCommandLineOptions();
   EXPECT_EQ(cmd->requests_per_second().value(), options->requestsPerSecond());
@@ -205,7 +247,14 @@ TEST_F(OptionsImplTest, AlmostAll) {
             options->h1ConnectionReuseStrategy());
   EXPECT_THAT(cmd->labels(), ElementsAreArray(expected_labels));
   EXPECT_EQ(cmd->simple_warmup().value(), options->simpleWarmup());
-
+  EXPECT_EQ(10, cmd->stats_flush_interval().value());
+  ASSERT_EQ(cmd->stats_sinks_size(), options->statsSinks().size());
+  EXPECT_TRUE(util(cmd->stats_sinks(0), options->statsSinks()[0]));
+  EXPECT_TRUE(util(cmd->stats_sinks(1), options->statsSinks()[1]));
+  EXPECT_EQ(cmd->latency_response_header_name().value(), options->responseHeaderWithLatencyInput());
+  ASSERT_TRUE(cmd->has_allow_envoy_deprecated_v2_api());
+  EXPECT_EQ(cmd->allow_envoy_deprecated_v2_api().value(), options->allowEnvoyDeprecatedV2Api());
+  // TODO(#433) Here and below, replace comparisons once we choose a proto diff.
   OptionsImpl options_from_proto(*cmd);
   std::string s1 = Envoy::MessageUtil::getYamlStringFromMessage(
       *(options_from_proto.toCommandLineOptions()), true, true);
@@ -228,8 +277,120 @@ TEST_F(OptionsImplTest, RequestSource) {
   // Check that our conversion to CommandLineOptionsPtr makes sense.
   CommandLineOptionsPtr cmd = options->toCommandLineOptions();
   EXPECT_EQ(cmd->request_source().uri(), request_source);
+  // TODO(#433)
   OptionsImpl options_from_proto(*cmd);
   EXPECT_TRUE(util(*(options_from_proto.toCommandLineOptions()), *cmd));
+}
+
+class RequestSourcePluginTestFixture : public OptionsImplTest,
+                                       public WithParamInterface<std::string> {};
+TEST_P(RequestSourcePluginTestFixture, CreatesOptionsImplWithRequestSourceConfig) {
+  Envoy::MessageUtil util;
+  const std::string request_source_config = GetParam();
+  std::unique_ptr<OptionsImpl> options = TestUtility::createOptionsImpl(
+      fmt::format("{} --request-source-plugin-config {} {}", client_name_, request_source_config,
+                  good_test_uri_));
+
+  CommandLineOptionsPtr command = options->toCommandLineOptions();
+  EXPECT_TRUE(
+      util(command->request_source_plugin_config(), options->requestSourcePluginConfig().value()));
+
+  // The predicates are defined as proto maps, and these seem to re-serialize into a different
+  // order. Hence we trim the maps to contain a single entry so they don't thwart our textual
+  // comparison below.
+  EXPECT_EQ(1, command->mutable_failure_predicates()->erase("benchmark.http_4xx"));
+  EXPECT_EQ(1, command->mutable_failure_predicates()->erase("benchmark.http_5xx"));
+  EXPECT_EQ(1, command->mutable_failure_predicates()->erase("requestsource.upstream_rq_5xx"));
+
+  // TODO(#433)
+  // Now we construct a new options from the proto we created above. This should result in an
+  // OptionsImpl instance equivalent to options. We test that by converting both to yaml strings,
+  // expecting them to be equal. This should provide helpful output when the test fails by showing
+  // the unexpected (yaml) diff.
+  OptionsImpl options_from_proto(*command);
+  std::string yaml_for_options_proto = Envoy::MessageUtil::getYamlStringFromMessage(
+      *(options_from_proto.toCommandLineOptions()), true, true);
+  std::string yaml_for_command = Envoy::MessageUtil::getYamlStringFromMessage(*command, true, true);
+  EXPECT_EQ(yaml_for_options_proto, yaml_for_command);
+  // Additional comparison to avoid edge cases missed.
+  EXPECT_TRUE(util(*(options_from_proto.toCommandLineOptions()), *command));
+}
+std::vector<std::string> RequestSourcePluginJsons() {
+  std::string file_request_source_plugin_json =
+      "{"
+      R"(name:"nighthawk.file-based-request-source-plugin",)"
+      "typed_config:{"
+      R"("@type":"type.googleapis.com/)"
+      R"(nighthawk.request_source.FileBasedOptionsListRequestSourceConfig",)"
+      R"(file_path:")" +
+      TestEnvironment::runfilesPath("test/request_source/test_data/test-config.yaml") +
+      "\","
+      "}"
+      "}";
+  std::string in_line_request_source_plugin_json =
+      "{"
+      R"(name:"nighthawk.in-line-options-list-request-source-plugin",)"
+      "typed_config:{"
+      R"("@type":"type.googleapis.com/)"
+      R"(nighthawk.request_source.InLineOptionsListRequestSourceConfig",)"
+      "options_list:{"
+      R"(options:[{request_method:"1",request_headers:[{header:{key:"key",value:"value"}}]}])"
+      "},"
+      "}"
+      "}";
+  std::string stub_request_source_plugin_json =
+      "{"
+      R"(name:"nighthawk.stub-request-source-plugin",)"
+      "typed_config:{"
+      R"("@type":"type.googleapis.com/nighthawk.request_source.StubPluginConfig",)"
+      R"(test_value:"3",)"
+      "}"
+      "}";
+  return std::vector<std::string>{
+      file_request_source_plugin_json,
+      in_line_request_source_plugin_json,
+      stub_request_source_plugin_json,
+  };
+}
+INSTANTIATE_TEST_SUITE_P(HappyPathRequestSourceConfigJsonSuccessfullyTranslatesIntoOptions,
+                         RequestSourcePluginTestFixture,
+                         ::testing::ValuesIn(RequestSourcePluginJsons()));
+
+// This test covers --RequestSourcePlugin, which can't be tested at the same time as --RequestSource
+// and some other options. This is the test for the inlineoptionslistplugin.
+TEST_F(OptionsImplTest, InLineOptionsListRequestSourcePluginIsMutuallyExclusiveWithRequestSource) {
+  const std::string request_source = "127.9.9.4:32323";
+  const std::string request_source_config =
+      "{"
+      "name:\"nighthawk.in-line-options-list-request-source-plugin\","
+      "typed_config:{"
+      "\"@type\":\"type.googleapis.com/"
+      "nighthawk.request_source.InLineOptionsListRequestSourceConfig\","
+      "options_list:{"
+      "options:[{request_method:\"1\",request_headers:[{header:{key:\"key\",value:\"value\"}}]}]"
+      "},"
+      "}"
+      "}";
+  EXPECT_THROW_WITH_REGEX(
+      TestUtility::createOptionsImpl(
+          fmt::format("{} --request-source-plugin-config {} --request-source {} {}", client_name_,
+                      request_source_config, request_source, good_test_uri_)),
+      MalformedArgvException,
+      "--request-source and --request_source_plugin_config cannot both be set.");
+}
+
+TEST_F(OptionsImplTest, BadRequestSourcePluginSpecification) {
+  // Bad JSON
+  EXPECT_THROW_WITH_REGEX(
+      TestUtility::createOptionsImpl(fmt::format("{} --request-source-plugin-config {} {}",
+                                                 client_name_, "{broken_json:", good_test_uri_)),
+      MalformedArgvException, "Unable to parse JSON as proto");
+  // Correct JSON, but contents not according to spec.
+  EXPECT_THROW_WITH_REGEX(TestUtility::createOptionsImpl(
+                              fmt::format("{} --request-source-plugin-config {} {}", client_name_,
+                                          "{misspelled_field:{}}", good_test_uri_)),
+                          MalformedArgvException,
+                          "envoy.config.core.v3.TypedExtensionConfig reason INVALID_ARGUMENT");
 }
 
 // We test --no-duration here and not in All above because it is exclusive to --duration.
@@ -240,6 +401,7 @@ TEST_F(OptionsImplTest, NoDuration) {
   EXPECT_TRUE(options->noDuration());
   // Check that our conversion to CommandLineOptionsPtr makes sense.
   CommandLineOptionsPtr cmd = options->toCommandLineOptions();
+  // TODO(#433)
   OptionsImpl options_from_proto(*cmd);
   EXPECT_TRUE(util(*(options_from_proto.toCommandLineOptions()), *cmd));
 }
@@ -280,7 +442,7 @@ TEST_F(OptionsImplTest, TlsContext) {
   EXPECT_EQ(1, cmd->mutable_failure_predicates()->erase("benchmark.http_4xx"));
   EXPECT_EQ(1, cmd->mutable_failure_predicates()->erase("benchmark.http_5xx"));
   EXPECT_EQ(1, cmd->mutable_failure_predicates()->erase("requestsource.upstream_rq_5xx"));
-
+  // TODO(#433)
   OptionsImpl options_from_proto(*cmd);
   std::string s1 = Envoy::MessageUtil::getYamlStringFromMessage(
       *(options_from_proto.toCommandLineOptions()), true, true);
@@ -342,7 +504,7 @@ TEST_F(OptionsImplTest, MultiTarget) {
   EXPECT_EQ(1, cmd->mutable_failure_predicates()->erase("benchmark.http_4xx"));
   EXPECT_EQ(1, cmd->mutable_failure_predicates()->erase("benchmark.http_5xx"));
   EXPECT_EQ(1, cmd->mutable_failure_predicates()->erase("requestsource.upstream_rq_5xx"));
-
+  // TODO(#433)
   OptionsImpl options_from_proto(*cmd);
   std::string s1 = Envoy::MessageUtil::getYamlStringFromMessage(
       *(options_from_proto.toCommandLineOptions()), true, true);
@@ -376,14 +538,15 @@ TEST_F(OptionsImplTest, NoArguments) {
 
 TEST_P(OptionsImplIntTestNonZeroable, NonZeroableOptions) {
   const char* option_name = GetParam();
-  EXPECT_THROW_WITH_REGEX(TestUtility::createOptionsImpl(fmt::format("{} --{} 0 {}", client_name_,
-                                                                     option_name, good_test_uri_)),
+  EXPECT_THROW_WITH_REGEX(TestUtility::createOptionsImpl(fmt::format(
+                              "{} --{} 0 --stats-sinks {} {}", client_name_, option_name,
+                              "{name:\"envoy.stat_sinks.statsd\"}", good_test_uri_)),
                           std::exception, "Proto constraint validation failed");
 }
 
 INSTANTIATE_TEST_SUITE_P(NonZeroableIntOptionTests, OptionsImplIntTestNonZeroable,
                          Values("rps", "connections", "max-active-requests",
-                                "max-requests-per-connection"));
+                                "max-requests-per-connection", "stats-flush-interval"));
 
 // Check standard expectations for any integer values options we offer.
 TEST_P(OptionsImplIntTest, IntOptionsBadValuesTest) {
@@ -434,6 +597,22 @@ TEST_F(OptionsImplTest, PrefetchConnectionsFlag) {
                           MalformedArgvException, "Couldn't find match for argument");
 }
 
+TEST_F(OptionsImplTest, AllowEnvoyDeprecatedV2ApiFlag) {
+  EXPECT_FALSE(TestUtility::createOptionsImpl(fmt::format("{} {}", client_name_, good_test_uri_))
+                   ->allowEnvoyDeprecatedV2Api());
+  EXPECT_TRUE(TestUtility::createOptionsImpl(fmt::format("{} --allow-envoy-deprecated-v2-api {}",
+                                                         client_name_, good_test_uri_))
+                  ->allowEnvoyDeprecatedV2Api());
+  EXPECT_THROW_WITH_REGEX(
+      TestUtility::createOptionsImpl(
+          fmt::format("{} --allow-envoy-deprecated-v2-api 0 {}", client_name_, good_test_uri_)),
+      MalformedArgvException, "Couldn't find match for argument");
+  EXPECT_THROW_WITH_REGEX(
+      TestUtility::createOptionsImpl(
+          fmt::format("{} --allow-envoy-deprecated-v2-api true {}", client_name_, good_test_uri_)),
+      MalformedArgvException, "Couldn't find match for argument");
+}
+
 // Test --concurrency, which is a bit special. It's an int option, which also accepts 'auto' as
 // a value. We need to implement some stuff ourselves to get this to work, hence we don't run it
 // through the OptionsImplIntTest.
@@ -467,11 +646,11 @@ TEST_F(OptionsImplTest, JitterValueRangeTest) {
   EXPECT_THROW_WITH_REGEX(TestUtility::createOptionsImpl(fmt::format("{} --jitter-uniform -1s {}",
                                                                      client_name_, good_test_uri_)),
                           MalformedArgvException, "--jitter-uniform is out of range");
-  // No 0 duration accepted
-  EXPECT_THROW_WITH_REGEX(TestUtility::createOptionsImpl(fmt::format("{} --jitter-uniform 0s {}",
-                                                                     client_name_, good_test_uri_)),
-                          MalformedArgvException, "--jitter-uniform is out of range");
-  // No durations >= 1s are accepted
+  // Durations >= 0s are accepted
+  EXPECT_NO_THROW(TestUtility::createOptionsImpl(
+      fmt::format("{} --jitter-uniform 0s {}", client_name_, good_test_uri_)));
+  EXPECT_NO_THROW(TestUtility::createOptionsImpl(
+      fmt::format("{} --jitter-uniform 0.1s {}", client_name_, good_test_uri_)));
   EXPECT_NO_THROW(TestUtility::createOptionsImpl(
       fmt::format("{} --jitter-uniform 1s {}", client_name_, good_test_uri_)));
   EXPECT_NO_THROW(TestUtility::createOptionsImpl(
@@ -595,6 +774,18 @@ TEST_F(OptionsImplTest, BadTransportSocketSpecification) {
       MalformedArgvException,
       "Protobuf message \\(type envoy.config.core.v3.TransportSocket reason "
       "INVALID_ARGUMENT:misspelled_transport_socket: Cannot find field.\\) has unknown fields");
+}
+
+TEST_F(OptionsImplTest, BadStatsSinksSpecification) {
+  // Bad JSON
+  EXPECT_THROW_WITH_REGEX(TestUtility::createOptionsImpl(fmt::format(
+                              "{} --stats-sinks {} http://foo/", client_name_, "{broken_json:")),
+                          MalformedArgvException, "Unable to parse JSON as proto");
+  // Correct JSON, but contents not according to spec.
+  EXPECT_THROW_WITH_REGEX(
+      TestUtility::createOptionsImpl(fmt::format("{} --stats-sinks {} http://foo/", client_name_,
+                                                 "{misspelled_stats_sink:{}}")),
+      MalformedArgvException, "misspelled_stats_sink: Cannot find field");
 }
 
 class OptionsImplPredicateBasedOptionsTest : public OptionsImplTest,

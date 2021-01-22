@@ -9,6 +9,26 @@ licenses(["notice"])  # Apache 2
 envoy_package()
 
 envoy_cc_library(
+    name = "nighthawk_service_client_impl",
+    srcs = [
+        "nighthawk_service_client_impl.cc",
+    ],
+    hdrs = [
+        "nighthawk_service_client_impl.h",
+    ],
+    repository = "@envoy",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//api/client:base_cc_proto",
+        "//api/client:grpc_service_lib",
+        "//include/nighthawk/common:nighthawk_service_client",
+        "@envoy//source/common/common:assert_lib_with_external_headers",
+        "@envoy//source/common/common:statusor_lib_with_external_headers",
+        "@envoy//source/common/protobuf:protobuf_with_external_headers",
+    ],
+)
+
+envoy_cc_library(
     name = "request_impl_lib",
     hdrs = [
         "request_impl.h",
@@ -40,6 +60,8 @@ envoy_cc_library(
         "@envoy//source/common/grpc:typed_async_client_lib_with_external_headers",
         "@envoy//source/common/http:header_map_lib_with_external_headers",
         "@envoy//source/common/http:headers_lib_with_external_headers",
+        "@envoy_api//envoy/api/v2/core:pkg_cc_proto",
+        "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
     ],
 )
 
@@ -58,6 +80,33 @@ envoy_cc_library(
         ":request_impl_lib",
         ":request_stream_grpc_client_lib",
         "//include/nighthawk/common:request_source_lib",
+    ],
+)
+
+envoy_cc_library(
+    name = "version_linkstamp",
+    srcs = ["version_linkstamp.cc"],
+    repository = "@envoy",
+    deps = [
+        "@envoy//source/common/version:version_includes",
+    ],
+)
+
+envoy_cc_library(
+    name = "thread_safe_monotonic_time_stopwatch_lib",
+    srcs = [
+        "thread_safe_monotonic_time_stopwatch.cc",
+    ],
+    hdrs = [
+        "thread_safe_monotonic_time_stopwatch.h",
+    ],
+    repository = "@envoy",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//include/nighthawk/common:stopwatch_lib",
+        "@envoy//include/envoy/common:time_interface",
+        "@envoy//source/common/common:lock_guard_lib_with_external_headers",
+        "@envoy//source/common/common:thread_lib_with_external_headers",
     ],
 )
 
@@ -105,11 +154,11 @@ envoy_cc_library(
         "@envoy//source/common/common:macros_with_external_headers",
         "@envoy//source/common/common:minimal_logger_lib_with_external_headers",
         "@envoy//source/common/common:thread_lib_with_external_headers",
-        "@envoy//source/common/common:version_includes_with_external_headers",
         "@envoy//source/common/http:utility_lib_with_external_headers",
         "@envoy//source/common/network:utility_lib_with_external_headers",
         "@envoy//source/common/protobuf:utility_lib_with_external_headers",
-        "@envoy//source/common/stats:stats_lib_with_external_headers",
+        "@envoy//source/common/stats:histogram_lib_with_external_headers",
+        "@envoy//source/common/version:version_includes_with_external_headers",
         "@envoy//source/exe:envoy_common_lib_with_external_headers",
         "@envoy//source/server/config_validation:server_lib_with_external_headers",
     ],

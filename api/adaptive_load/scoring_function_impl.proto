@@ -1,0 +1,30 @@
+// Plugin-specific config protos for ScoringFunction plugins.
+
+syntax = "proto3";
+
+package nighthawk.adaptive_load;
+
+import "google/protobuf/wrappers.proto";
+
+// Configuration for BinaryScoringFunction (plugin name: "nighthawk.binary_scoring") that
+// is 1.0 when the value is within thresholds and -1.0 otherwise.
+message BinaryScoringFunctionConfig {
+  // The minimum allowed value of the metric. Optional, default -infinity.
+  google.protobuf.DoubleValue lower_threshold = 1;
+  // The maximum allowed value of the metric. Optional, default infinity.
+  google.protobuf.DoubleValue upper_threshold = 2;
+}
+
+// Configuration for LinearScoringFunction (plugin name: "nighthawk.linear_scoring") that
+// calculates a metric score as k * (threshold - value), where k is a scaling constant. The score is
+// 0.0 when the value exactly equals the threshold, positive below the threshold (meaning input
+// should ramp up), and negative above the threshold. The score is proportional to the difference
+// from the threshold.
+message LinearScoringFunctionConfig {
+  // The target value of the metric. Required.
+  double threshold = 1;
+  // Scaling constant: score = scaling_constant * (threshold - value). Use this in combination
+  // with step controller constants to produce reasonable input increments for reasonable
+  // differences from the threshold. Required.
+  double scaling_constant = 2;
+}

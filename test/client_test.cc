@@ -26,6 +26,7 @@ class ClientTest : public testing::Test {};
 TEST_F(ClientTest, NormalRun) {
   Main program(Nighthawk::Client::TestUtility::createOptionsImpl(
       "foo --duration 1 --rps 10 http://localhost:63657/"));
+
   EXPECT_FALSE(program.run());
 }
 
@@ -76,6 +77,20 @@ TEST_F(ClientTest, TracingRun) {
 TEST_F(ClientTest, BadRun) {
   Main program(Nighthawk::Client::TestUtility::createOptionsImpl(
       "foo --duration 1 --rps 1 https://unresolveable.host/"));
+  EXPECT_FALSE(program.run());
+}
+
+TEST_F(ClientTest, BadRemoteRun) {
+  Main program(Nighthawk::Client::TestUtility::createOptionsImpl(
+      "foo --duration 1 --nighthawk-service grpc://unresolveable.host:8843 --rps 1 "
+      "http://localhost:63657/"));
+  EXPECT_FALSE(program.run());
+}
+
+TEST_F(ClientTest, RemoteRun) {
+  Main program(Nighthawk::Client::TestUtility::createOptionsImpl(
+      "foo --duration 1 --nighthawk-service grpc://localhost:8843 --rps 1 "
+      "http://localhost:63657/"));
   EXPECT_FALSE(program.run());
 }
 

@@ -1,5 +1,6 @@
 #include <thread>
 
+#include "external/envoy/source/common/common/random_generator.h"
 #include "external/envoy/source/common/runtime/runtime_impl.h"
 #include "external/envoy/source/common/stats/isolated_store_impl.h"
 #include "external/envoy/test/mocks/local_info/mocks.h"
@@ -36,7 +37,7 @@ public:
   Envoy::Api::ApiPtr api_;
   Envoy::ThreadLocal::MockInstance tls_;
   Envoy::Stats::IsolatedStoreImpl test_store_;
-  Envoy::Runtime::RandomGeneratorImpl rand_;
+  Envoy::Random::RandomGeneratorImpl rand_;
   NiceMock<Envoy::LocalInfo::MockLocalInfo> local_info_;
   NiceMock<Envoy::ProtobufMessage::MockValidationVisitor> validation_visitor_;
 };
@@ -44,8 +45,8 @@ public:
 TEST_F(WorkerTest, WorkerExecutesOnThread) {
   InSequence in_sequence;
 
-  EXPECT_CALL(tls_, registerThread(_, false)).Times(1);
-  EXPECT_CALL(tls_, allocateSlot()).Times(1);
+  EXPECT_CALL(tls_, registerThread(_, false));
+  EXPECT_CALL(tls_, allocateSlot());
 
   TestWorker worker(*api_, tls_);
   NiceMock<Envoy::Event::MockDispatcher> dispatcher;
@@ -56,7 +57,7 @@ TEST_F(WorkerTest, WorkerExecutesOnThread) {
   worker.start();
   worker.waitForCompletion();
 
-  EXPECT_CALL(tls_, shutdownThread()).Times(1);
+  EXPECT_CALL(tls_, shutdownThread());
   ASSERT_TRUE(worker.ran_);
   worker.shutdown();
 }

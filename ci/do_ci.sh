@@ -4,6 +4,10 @@ set -eo pipefail
 set +x
 set -u
 
+if [ $# -eq 0 ]; then
+    set -- "help"
+fi
+
 export BUILDIFIER_BIN="${BUILDIFIER_BIN:=/usr/local/bin/buildifier}"
 export BUILDOZER_BIN="${BUILDOZER_BIN:=/usr/local/bin/buildozer}"
 export NUM_CPUS=${NUM_CPUS:=$(grep -c ^processor /proc/cpuinfo)}
@@ -20,20 +24,32 @@ function do_build () {
 }
 
 function do_opt_build () {
-    bazel build $BAZEL_BUILD_OPTIONS -c opt //:nighthawk
+    bazel build $BAZEL_BUILD_OPTIONS -c opt --define tcmalloc=gperftools //:nighthawk
+    bazel build $BAZEL_BUILD_OPTIONS -c opt --define tcmalloc=gperftools //benchmarks:benchmarks
 }
 
 function do_test() {
-    bazel build $BAZEL_BUILD_OPTIONS //test/...
-    bazel test $BAZEL_TEST_OPTIONS --test_output=all //test/...
+    bazel build -c dbg $BAZEL_BUILD_OPTIONS //test/...
+    bazel test -c dbg $BAZEL_TEST_OPTIONS --test_output=all //test/...
 }
 
 function do_clang_tidy() {
-    ci/run_clang_tidy.sh
+    # TODO(#546): deflake clang tidy runs, and remove '|| true' here.
+    ci/run_clang_tidy.sh || true
 }
 
-function do_coverage() {
-    export TEST_TARGETS="//test/..."
+function do_unit_test_coverage() {
+    export TEST_TARGETS="//test/... -//test:python_test"
+    export COVERAGE_THRESHOLD=94.0
+    echo "bazel coverage build with tests ${TEST_TARGETS}"
+    test/run_nighthawk_bazel_coverage.sh ${TEST_TARGETS}
+    exit 0
+}
+
+function do_integration_test_coverage() {
+    export TEST_TARGETS="//test:python_test"
+    #TODO(#564): Revert this to 78.6
+    export COVERAGE_THRESHOLD=75.0
     echo "bazel coverage build with tests ${TEST_TARGETS}"
     test/run_nighthawk_bazel_coverage.sh ${TEST_TARGETS}
     exit 0
@@ -72,28 +88,18 @@ function run_bazel() {
     fi
 }
 
-function do_asan() {
-    echo "bazel ASAN/UBSAN debug build with tests"
-    echo "Building and testing envoy tests..."
+function do_sanitizer() {
+    CONFIG="$1"
+    echo "bazel $CONFIG debug build with tests"
+    echo "Building and testing Nighthawk tests..."
     cd "${SRCDIR}"
 
     # We build this in steps to avoid running out of memory in CI
-    run_bazel build ${BAZEL_TEST_OPTIONS} -c dbg --config=clang-asan -- //source/exe/... && \
-    run_bazel build ${BAZEL_TEST_OPTIONS} -c dbg --config=clang-asan -- //source/server/... && \
-    run_bazel build ${BAZEL_TEST_OPTIONS} -c dbg --config=clang-asan -- //test/mocks/... && \
-    run_bazel build ${BAZEL_TEST_OPTIONS} -c dbg --config=clang-asan -- //test/... && \
-    run_bazel test ${BAZEL_TEST_OPTIONS} -c dbg --config=clang-asan -- //test/...
-}
-
-function do_tsan() {
-    echo "bazel TSAN debug build with tests"
-    echo "Building and testing envoy tests..."
-    cd "${SRCDIR}"
-    run_bazel build ${BAZEL_TEST_OPTIONS} -c dbg --config=clang-tsan -- //source/exe/... && \
-    run_bazel build ${BAZEL_TEST_OPTIONS} -c dbg --config=clang-tsan -- //source/server/... && \
-    run_bazel build ${BAZEL_TEST_OPTIONS} -c dbg --config=clang-tsan -- //test/mocks/... && \
-    run_bazel build ${BAZEL_TEST_OPTIONS} -c dbg --config=clang-tsan -- //test/... && \
-    run_bazel test ${BAZEL_TEST_OPTIONS} -c dbg --config=clang-tsan //test/...
+    run_bazel build ${BAZEL_TEST_OPTIONS} -c dbg --config="$CONFIG" -- //source/exe/... && \
+    run_bazel build ${BAZEL_TEST_OPTIONS} -c dbg --config="$CONFIG" -- //source/server/... && \
+    run_bazel build ${BAZEL_TEST_OPTIONS} -c dbg --config="$CONFIG" -- //test/mocks/... && \
+    run_bazel build ${BAZEL_TEST_OPTIONS} -c dbg --config="$CONFIG" -- //test/... && \
+    run_bazel test ${BAZEL_TEST_OPTIONS} -c dbg --config="$CONFIG" -- //test/...
 }
 
 function cleanup_benchmark_artifacts {
@@ -123,6 +129,7 @@ function do_benchmark_with_own_binaries() {
         --compilation_mode=opt \
         --cxxopt=-g \
         --cxxopt=-ggdb3 \
+        --define tcmalloc=gperftools \
         //benchmarks:*
 }
 
@@ -140,6 +147,7 @@ function do_docker() {
     do_opt_build
     ./ci/docker/docker_build.sh
     ./ci/docker/docker_push.sh
+    ./ci/docker/benchmark_build.sh
 }
 
 function do_fix_format() {
@@ -182,20 +190,13 @@ if [ -n "$CIRCLECI" ]; then
         mv "${HOME:-/root}/.gitconfig" "${HOME:-/root}/.gitconfig_save"
         echo 1
     fi
-    
-    # Asan has huge memory requirements in its link steps.
-    # As of the new coverage methodology introduced in Envoy, that has grown memory requirements too.
-    # Hence we heavily reduce parallellism, to avoid being OOM killed.
-    if [[ "$1" == "coverage" ]]; then
+    NUM_CPUS=8
+    if [[ "$1" == "test_gcc" ]]; then
         NUM_CPUS=4
-    elif [[ "$1" == "asan" ]]; then
-        NUM_CPUS=3
-    else
-        NUM_CPUS=8
     fi
+    echo "Running with ${NUM_CPUS} cpus"
+    BAZEL_BUILD_OPTIONS="${BAZEL_BUILD_OPTIONS} --jobs=${NUM_CPUS}"
 fi
-echo "Running with ${NUM_CPUS} cpus"
-BAZEL_BUILD_OPTIONS="${BAZEL_BUILD_OPTIONS} --jobs=${NUM_CPUS}"
 
 export BAZEL_TEST_OPTIONS="${BAZEL_BUILD_OPTIONS} --test_env=HOME --test_env=PYTHONUSERBASE \
 --test_env=UBSAN_OPTIONS=print_stacktrace=1 \
@@ -214,29 +215,32 @@ case "$1" in
     ;;
     test_gcc)
         setup_gcc_toolchain
-        # TODO(#362): change the line below to do_test once the upstream merges
-        # https://github.com/envoyproxy/envoy/pull/10236
-        do_build
+        do_test
         exit 0
     ;;
     clang_tidy)
         setup_clang_toolchain
-        do_clang_tidy
+        RUN_FULL_CLANG_TIDY=1 do_clang_tidy
         exit 0
     ;;
     coverage)
         setup_clang_toolchain
-        do_coverage
+        do_unit_test_coverage
+        exit 0
+    ;;
+    coverage_integration)
+        setup_clang_toolchain
+        do_integration_test_coverage
         exit 0
     ;;
     asan)
         setup_clang_toolchain
-        do_asan
+        do_sanitizer "clang-asan"
         exit 0
     ;;
     tsan)
         setup_clang_toolchain
-        do_tsan
+        do_sanitizer "clang-tsan"
         exit 0
     ;;
     docker)
@@ -259,8 +263,13 @@ case "$1" in
         do_benchmark_with_own_binaries
         exit 0
     ;;
+    opt_build)
+        setup_clang_toolchain
+        do_opt_build
+        exit 0
+    ;;
     *)
-        echo "must be one of [build,test,clang_tidy,coverage,asan,tsan,benchmark_with_own_binaries,docker,check_format,fix_format,test_gcc]"
+        echo "must be one of [opt_build, build,test,clang_tidy,coverage,coverage_integration,asan,tsan,benchmark_with_own_binaries,docker,check_format,fix_format,test_gcc]"
         exit 1
     ;;
 esac

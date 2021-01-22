@@ -4,10 +4,8 @@
 
 #include "envoy/server/filter_config.h"
 
-#include "external/envoy/source/common/protobuf/message_validator_impl.h"
-#include "external/envoy/source/common/protobuf/utility.h"
-
-#include "api/server/response_options.pb.validate.h"
+#include "server/configuration.h"
+#include "server/well_known_headers.h"
 
 #include "absl/strings/numbers.h"
 
@@ -15,8 +13,8 @@ namespace Nighthawk {
 namespace Server {
 
 HttpTestServerDecoderFilterConfig::HttpTestServerDecoderFilterConfig(
-    nighthawk::server::ResponseOptions proto_config)
-    : server_config_(std::move(proto_config)) {}
+    const nighthawk::server::ResponseOptions& proto_config)
+    : FilterConfigurationBase(proto_config, "test-server") {}
 
 HttpTestServerDecoderFilter::HttpTestServerDecoderFilter(
     HttpTestServerDecoderFilterConfigSharedPtr config)
@@ -24,71 +22,34 @@ HttpTestServerDecoderFilter::HttpTestServerDecoderFilter(
 
 void HttpTestServerDecoderFilter::onDestroy() {}
 
-bool HttpTestServerDecoderFilter::mergeJsonConfig(absl::string_view json,
-                                                  nighthawk::server::ResponseOptions& config,
-                                                  absl::optional<std::string>& error_message) {
-  error_message = absl::nullopt;
-  try {
-    nighthawk::server::ResponseOptions json_config;
-    auto& validation_visitor = Envoy::ProtobufMessage::getStrictValidationVisitor();
-    Envoy::MessageUtil::loadFromJson(std::string(json), json_config, validation_visitor);
-    config.MergeFrom(json_config);
-    Envoy::MessageUtil::validate(config, validation_visitor);
-  } catch (const Envoy::EnvoyException& exception) {
-    error_message.emplace(fmt::format("Error merging json config: {}", exception.what()));
+void HttpTestServerDecoderFilter::sendReply(const nighthawk::server::ResponseOptions& options) {
+  std::string response_body(options.response_body_size(), 'a');
+  if (request_headers_dump_.has_value()) {
+    response_body += *request_headers_dump_;
   }
-  return error_message == absl::nullopt;
-}
-
-void HttpTestServerDecoderFilter::applyConfigToResponseHeaders(
-    Envoy::Http::ResponseHeaderMap& response_headers,
-    nighthawk::server::ResponseOptions& response_options) {
-  for (const auto& header_value_option : response_options.response_headers()) {
-    const auto& header = header_value_option.header();
-    auto lower_case_key = Envoy::Http::LowerCaseString(header.key());
-    if (!header_value_option.append().value()) {
-      response_headers.remove(lower_case_key);
-    }
-    response_headers.addCopy(lower_case_key, header.value());
-  }
-}
-
-void HttpTestServerDecoderFilter::sendReply() {
-  if (error_message_ == absl::nullopt) {
-    std::string response_body(base_config_.response_body_size(), 'a');
-    if (request_headers_dump_.has_value()) {
-      response_body += *request_headers_dump_;
-    }
-    decoder_callbacks_->sendLocalReply(
-        static_cast<Envoy::Http::Code>(200), response_body,
-        [this](Envoy::Http::ResponseHeaderMap& direct_response_headers) {
-          applyConfigToResponseHeaders(direct_response_headers, base_config_);
-        },
-        absl::nullopt, "");
-  } else {
-    decoder_callbacks_->sendLocalReply(
-        static_cast<Envoy::Http::Code>(500),
-        fmt::format("test-server didn't understand the request: {}", *error_message_), nullptr,
-        absl::nullopt, "");
-  }
+  decoder_callbacks_->sendLocalReply(
+      static_cast<Envoy::Http::Code>(200), response_body,
+      [options](Envoy::Http::ResponseHeaderMap& direct_response_headers) {
+        Configuration::applyConfigToResponseHeaders(direct_response_headers, options);
+      },
+      absl::nullopt, "");
 }
 
 Envoy::Http::FilterHeadersStatus
 HttpTestServerDecoderFilter::decodeHeaders(Envoy::Http::RequestHeaderMap& headers,
                                            bool end_stream) {
-  // TODO(oschaaf): Add functionality to clear fields
-  base_config_ = config_->server_config();
-  const auto* request_config_header = headers.get(TestServer::HeaderNames::get().TestServerConfig);
-  if (request_config_header) {
-    mergeJsonConfig(request_config_header->value().getStringView(), base_config_, error_message_);
-  }
-  if (base_config_.echo_request_headers()) {
-    std::stringstream headers_dump;
-    headers_dump << "\nRequest Headers:\n" << headers;
-    request_headers_dump_ = headers_dump.str();
-  }
+  config_->computeEffectiveConfiguration(headers);
   if (end_stream) {
-    sendReply();
+    if (!config_->validateOrSendError(*decoder_callbacks_)) {
+      const absl::StatusOr<EffectiveFilterConfigurationPtr> effective_config =
+          config_->getEffectiveConfiguration();
+      if (effective_config.value()->echo_request_headers()) {
+        std::stringstream headers_dump;
+        headers_dump << "\nRequest Headers:\n" << headers;
+        request_headers_dump_ = headers_dump.str();
+      }
+      sendReply(*effective_config.value());
+    }
   }
   return Envoy::Http::FilterHeadersStatus::StopIteration;
 }
@@ -96,7 +57,9 @@ HttpTestServerDecoderFilter::decodeHeaders(Envoy::Http::RequestHeaderMap& header
 Envoy::Http::FilterDataStatus HttpTestServerDecoderFilter::decodeData(Envoy::Buffer::Instance&,
                                                                       bool end_stream) {
   if (end_stream) {
-    sendReply();
+    if (!config_->validateOrSendError(*decoder_callbacks_)) {
+      sendReply(*config_->getEffectiveConfiguration().value());
+    }
   }
   return Envoy::Http::FilterDataStatus::StopIterationNoBuffer;
 }

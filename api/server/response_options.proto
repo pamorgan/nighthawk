@@ -2,16 +2,49 @@ syntax = "proto3";
 
 package nighthawk.server;
 
+import "envoy/api/v2/core/base.proto";
+import "envoy/config/core/v3/base.proto";
+import "google/protobuf/duration.proto";
 import "google/protobuf/wrappers.proto";
 import "validate/validate.proto";
-import "envoy/api/v2/core/base.proto";
 
-// Options that control the test server response.
+message ConcurrencyBasedLinearDelay {
+  // Minimal delay to add to replies.
+  google.protobuf.Duration minimal_delay = 1 [(validate.rules).duration.gte.nanos = 0];
+  // Factor to use when adding latency as concurrency increases.
+  google.protobuf.Duration concurrency_delay_factor = 2 [(validate.rules).duration.gte.nanos = 0];
+}
+
+// Options that control the test server response. Can be provided via request
+// headers as well as via static file-based configuration. In case both are
+// provided, a merge will happen, in which case the header-provided
+// configuration will override.
 message ResponseOptions {
   // List of additional response headers.
-  repeated envoy.api.v2.core.HeaderValueOption response_headers = 1;
+  //
+  // Envoy deprecated its v2 API, prefer to use v3_response_headers instead.
+  // Mutually exclusive with v3_response_headers.
+  repeated envoy.api.v2.core.HeaderValueOption response_headers = 1 [deprecated = true];
+
+  // List of additional response headers.
+  // Mutually exclusive with response_headers.
+  repeated envoy.config.core.v3.HeaderValueOption v3_response_headers = 7;
+
   // Number of 'a' characters in the the response body.
   uint32 response_body_size = 2 [(validate.rules).uint32 = {lte: 4194304}];
   // If true, then echo request headers in the response body.
   bool echo_request_headers = 3;
+
+  oneof oneof_delay_options {
+    // Static delay duration.
+    google.protobuf.Duration static_delay = 4 [(validate.rules).duration.gte.nanos = 0];
+    // Concurrency based linear delay configuration.
+    ConcurrencyBasedLinearDelay concurrency_based_linear_delay = 5;
+  }
+  // If set, makes the extension include timing data in the supplied response header name.
+  // For example, when set to "x-abc", and 3 requests are performed, the test server will respond
+  // with: Response 1: No x-abc header because there's no previous response. Response 2: Header
+  // x-abc: <ns elapsed between responses 2 and 1>. Response 3: Header x-abc: <ns elapsed between
+  // responses 3 and 2>.
+  string emit_previous_request_delta_in_response_header = 6;
 }
